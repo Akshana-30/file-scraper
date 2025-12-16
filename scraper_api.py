@@ -6,6 +6,10 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 import fitz  # PyMuPDF
 from openpyxl import Workbook
+import shutil
+from fastapi.responses import FileResponse
+import uuid
+
 
 app = FastAPI()
 
@@ -86,23 +90,24 @@ def generate_pdf_report(pdf_folder):
 def scrape_files(request: ScrapeRequest):
     visited.clear()
 
+    base_folder = os.path.join("temp", str(uuid.uuid4()))
     scrape(
         request.base_url,
         request.base_url,
-        request.save_path,
+        base_folder,
         request.folder
     )
 
-    pdf_folder = os.path.join(request.save_path, request.folder, "pdf")
-    if os.path.exists(pdf_folder):
-        generate_pdf_report(pdf_folder)
+    zip_path = shutil.make_archive(base_folder, 'zip', base_folder)
 
-    return {
-        "message": "Download completed",
-        "saved_at": os.path.join(request.save_path, request.folder)
-    }
+    return FileResponse(
+        path=zip_path,
+        filename="downloaded_files.zip",
+        media_type="application/zip"
+    )
 
 
 
 #uvicorn scraper_api:app --reload
+
 
