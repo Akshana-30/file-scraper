@@ -2,23 +2,24 @@ import os
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import fitz  # PyMuPDF
-from openpyxl import Workbook
 import shutil
 from fastapi.responses import FileResponse
 import uuid
-
 
 app = FastAPI()
 
 class ScrapeRequest(BaseModel):
     base_url: str
-    save_path: str
     folder: str = "downloads"
 
 visited = set()
+MAX_PAGES = 50
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+}
 
 file_types = {
     "pdf": [".pdf"],
@@ -29,68 +30,55 @@ file_types = {
 # ---------------- DOWNLOAD FILE ----------------
 def download_file(url, folder):
     os.makedirs(folder, exist_ok=True)
-    filename = url.split("/")[-1]
+    filename = url.split("/")[-1].split("?")[0]
     filepath = os.path.join(folder, filename)
 
-    if not os.path.exists(filepath):
-        resp = requests.get(url)
+    if os.path.exists(filepath):
+        return
+
+    resp = requests.get(url, headers=HEADERS, timeout=20)
+    if resp.status_code == 200 and resp.content:
         with open(filepath, "wb") as f:
             f.write(resp.content)
-        print(f"Downloaded: {filename}")
+        print("Downloaded:", filename)
 
 # ---------------- SCRAPER ----------------
-def scrape(url, base_url, save_path, main_folder):
-    if url in visited:
+def scrape(url, base_url, base_folder, main_folder):
+    if url in visited or len(visited) >= MAX_PAGES:
         return
+
     visited.add(url)
+    print("Scraping:", url)
 
-    try:
-        response = requests.get(url)
-        soup = BeautifulSoup(response.text, "html.parser")
+    resp = requests.get(url, headers=HEADERS, timeout=20)
+    if resp.status_code != 200:
+        return
 
-        for link in soup.find_all("a", href=True):
-            file_url = urljoin(url, link["href"])
-            lower = file_url.lower()
+    soup = BeautifulSoup(resp.text, "html.parser")
+    links = soup.find_all("a", href=True)
 
-            for folder_name, extensions in file_types.items():
-                if any(lower.endswith(ext) for ext in extensions):
-                    target_folder = os.path.join(save_path, main_folder, folder_name)
-                    download_file(file_url, target_folder)
+    print("Links found:", len(links))
 
-            next_url = urljoin(url, link["href"])
-            if next_url.startswith(base_url):
-                scrape(next_url, base_url, save_path, main_folder)
+    for link in links:
+        file_url = urljoin(url, link["href"])
+        lower = file_url.lower()
 
-    except Exception as e:
-        print("Error:", e)
+        for folder_name, exts in file_types.items():
+            if any(lower.endswith(ext) for ext in exts):
+                target = os.path.join(base_folder, main_folder, folder_name)
+                download_file(file_url, target)
 
-# ---------------- PDF → EXCEL REPORT ----------------
-def generate_pdf_report(pdf_folder):
-    excel_path = os.path.join(pdf_folder, "pdf_page_counts.xlsx")
+        if file_url.startswith(base_url):
+            scrape(file_url, base_url, base_folder, main_folder)
 
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "PDF Page Count"
-    ws.append(["Filename", "Number of Pages",'Result/Output'])
-
-    for filename in os.listdir(pdf_folder):
-        if filename.lower().endswith(".pdf"):
-            file_path = os.path.join(pdf_folder, filename)
-            try:
-                doc = fitz.open(file_path)
-                ws.append([filename, doc.page_count])
-                doc.close()
-            except Exception as e:
-                ws.append([filename, "Error"])
-
-    wb.save(excel_path)
-
-# ---------------- API ENDPOINT ----------------
+# ---------------- API ----------------
 @app.post("/scrape_files")
 def scrape_files(request: ScrapeRequest):
     visited.clear()
 
-    base_folder = os.path.join("temp", str(uuid.uuid4()))
+    base_folder = os.path.join("/tmp", str(uuid.uuid4()))
+    os.makedirs(base_folder, exist_ok=True)
+
     scrape(
         request.base_url,
         request.base_url,
@@ -98,16 +86,19 @@ def scrape_files(request: ScrapeRequest):
         request.folder
     )
 
+    # ❗ CHECK IF FILES EXIST
+    has_files = any(files for _, _, files in os.walk(base_folder))
+    if not has_files:
+        raise HTTPException(
+            status_code=400,
+            detail="No files found. Target site may block scraping."
+        )
+
     zip_path = shutil.make_archive(base_folder, 'zip', base_folder)
 
     return FileResponse(
-        path=zip_path,
+        zip_path,
         filename="downloaded_files.zip",
-        media_type="application/zip"
+        media_type="application/zip",
+        headers={"Content-Disposition": "attachment"}
     )
-
-
-
-#uvicorn scraper_api:app --reload
-
-
